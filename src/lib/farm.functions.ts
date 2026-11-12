@@ -108,7 +108,7 @@ export const analyseSoilReport = createServerFn({ method: 'POST' })
       .parse(input),
   )
   .handler(async ({ data }): Promise<SoilReportResult> => {
-    const apiKey = process.env['GEMINI_API_KEY']?.trim()
+    const apiKey = (process.env['GEMINI_AI_API'] || process.env['GEMINI_API_KEY'])?.trim()
     if (!apiKey) {
       return { ok: false, error: 'GEMINI_API_KEY is not configured on the server.' }
     }
