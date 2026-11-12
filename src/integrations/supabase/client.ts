@@ -66,8 +66,8 @@ function createSupabaseClient() {
     global: {
       fetch: createSupabaseFetch(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY),
     },
-    auth: {
-      storage: brokeredPreviewStorage(),
+   auth: {
+      storage: typeof window !== 'undefined' ? window.localStorage : undefined,
       persistSession: true,
       autoRefreshToken: true,
     },
