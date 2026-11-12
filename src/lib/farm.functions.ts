@@ -16,30 +16,45 @@ export const askAssistant = createServerFn({ method: 'POST' })
       .parse(input),
   )
   .handler(async ({ data }) => {
-    const { generateChatCompletion, GatewayError } = await import('@lovable.dev/ai-gateway')
+    const apiKey = (process.env['GEMINI_AI_API'] || process.env['GEMINI_API_KEY'])?.trim()
+    if (!apiKey) {
+      console.error('[assistant] Missing GEMINI_API_KEY')
+      return { answer: '', error: 'Assistant unavailable' }
+    }
+
     const language = data.lang === 'ta' ? 'Tamil (in Tamil script)' : 'simple Indian English'
-    try {
-      const res = await generateChatCompletion({
-        model: 'google/gemini-3.5-flash',
-        messages: [
-          {
-            role: 'system',
-            content: `You are KhetMitra, a friendly voice assistant for Indian farmers inside a farm management app.
+    const systemPrompt = `You are KhetMitra, a friendly voice assistant for Indian farmers inside a farm management app.
 Always reply in ${language}. Your reply will be read aloud by text-to-speech, so:
 - Keep it to 2-4 short sentences, practical and specific.
 - No markdown, bullet points, emojis or symbols. Write numbers and units in words-friendly form (e.g. "2 grams per litre").
 - For pesticides, give the common chemical name and dose, and remind about safety gear and the label.
 - If the question is unrelated to farming or the app, answer briefly and politely steer back to farming.
 The app has screens: Home, Crop advice, Leaf scan, Fertilizer schedule, Ledger, Subsidies, Disaster aid, Devices, Field GPS location. Suggest a relevant screen when helpful.
-Farmer context: ${data.context}`,
-          },
-          { role: 'user', content: data.question },
-        ],
-      })
-      const text = res.choices?.[0]?.message?.content
+Farmer context: ${data.context}`
+
+    try {
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+            contents: [{ role: 'user', parts: [{ text: data.question }] }],
+          }),
+        },
+      )
+      if (!res.ok) {
+        console.error('[assistant] Gemini API error', res.status, await res.text())
+        return { answer: '', error: 'Assistant unavailable' }
+      }
+      const json = (await res.json()) as {
+        candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>
+      }
+      const text = json.candidates?.[0]?.content?.parts?.[0]?.text
       return { answer: typeof text === 'string' ? text.trim() : '' }
     } catch (error) {
-      console.error('[assistant] generation failed', error instanceof GatewayError ? error.code : error)
+      console.error('[assistant] generation failed', error)
       return { answer: '', error: 'Assistant unavailable' }
     }
   })
@@ -93,33 +108,56 @@ export const analyseSoilReport = createServerFn({ method: 'POST' })
       .parse(input),
   )
   .handler(async ({ data }): Promise<SoilReportResult> => {
-    const { generateChatCompletion, GatewayError } = await import('@lovable.dev/ai-gateway')
-    const dataUrl = `data:${data.mimeType};base64,${data.base64}`
-    const filePart =
-      data.mimeType === 'application/pdf'
-        ? ({ type: 'file', file: { filename: data.filename || 'soil-report.pdf', file_data: dataUrl } } as const)
-        : ({ type: 'image_url', image_url: { url: dataUrl } } as const)
+    const apiKey = process.env['GEMINI_API_KEY']?.trim()
+    if (!apiKey) {
+      return { ok: false, error: 'GEMINI_API_KEY is not configured on the server.' }
+    }
 
     let text = ''
     try {
-      const res = await generateChatCompletion({
-        model: 'google/gemini-3.8-flash',
-        temperature: 0,
-        response_format: { type: 'json_object' },
-        messages: [{ role: 'user', content: [{ type: 'text', text: SOIL_PROMPT }, filePart] }],
-      })
-      const content = res.choices?.[0]?.message?.content
-      text = typeof content === 'string' ? content : ''
-    } catch (error) {
-      console.error('[soil-report] analysis failed', error instanceof GatewayError ? error.code : error)
-      const busy = error instanceof GatewayError && ['RateLimitError', 'NetworkError', 'TimeoutError'].includes(error.name)
-      return {
-        ok: false,
-        error: busy
-          ? 'The report reader is busy. Please wait 30 seconds and try again. Your uploaded report was not lost.'
-          : 'Could not read this report. Try a clearer photo or PDF.',
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [
+              {
+                role: 'user',
+                parts: [
+                  { text: SOIL_PROMPT },
+                  { inlineData: { mimeType: data.mimeType, data: data.base64 } },
+                ],
+              },
+            ],
+            generationConfig: {
+              temperature: 0,
+              responseMimeType: 'application/json',
+            },
+          }),
+        },
+      )
+
+      if (!res.ok) {
+        console.error('[soil-report] Gemini API error', res.status, await res.text())
+        if (res.status === 429) {
+          return {
+            ok: false,
+            error: 'The report reader is busy. Please wait 30 seconds and try again. Your uploaded report was not lost.',
+          }
+        }
+        return { ok: false, error: 'Could not read this report. Try a clearer photo or PDF.' }
       }
+
+      const json = (await res.json()) as {
+        candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>
+      }
+      text = json.candidates?.[0]?.content?.parts?.[0]?.text ?? ''
+    } catch (error) {
+      console.error('[soil-report] analysis failed', error)
+      return { ok: false, error: 'Could not read this report. Try a clearer photo or PDF.' }
     }
+
     if (!text) return { ok: false, error: 'No readable result was returned. Try a clearer photo or PDF.' }
 
     let parsed: {
