@@ -16,7 +16,9 @@ export const askAssistant = createServerFn({ method: 'POST' })
       .parse(input),
   )
   .handler(async ({ data }) => {
-    const apiKey = (process.env['GEMINI_AI_API'] || process.env['GEMINI_API_KEY'])?.trim()
+    const apiKey = (process.env['GEMINI_AI_API'] || process.env['GEMINI_API_KEY'])
+      ?.trim()
+      .replace(/^["']|["']$/g, '')
     if (!apiKey) {
       console.error('[assistant] Missing GEMINI_API_KEY')
       return { answer: '', error: 'Assistant unavailable' }
@@ -108,9 +110,11 @@ export const analyseSoilReport = createServerFn({ method: 'POST' })
       .parse(input),
   )
   .handler(async ({ data }): Promise<SoilReportResult> => {
-    const apiKey = (process.env['GEMINI_AI_API'] || process.env['GEMINI_API_KEY'])?.trim()
+    const apiKey = (process.env['GEMINI_AI_API'] || process.env['GEMINI_API_KEY'])
+      ?.trim()
+      .replace(/^["']|["']$/g, '')
     if (!apiKey) {
-      return { ok: false, error: 'GEMINI_API_KEY is not configured on the server.' }
+      return { ok: false, error: 'GEMINI_AI_API / GEMINI_API_KEY is not configured on the server.' }
     }
 
     let text = ''
@@ -139,14 +143,20 @@ export const analyseSoilReport = createServerFn({ method: 'POST' })
       )
 
       if (!res.ok) {
-        console.error('[soil-report] Gemini API error', res.status, await res.text())
+        const errBody = await res.text()
+        console.error('[soil-report] Gemini API error', res.status, errBody)
         if (res.status === 429) {
           return {
             ok: false,
             error: 'The report reader is busy. Please wait 30 seconds and try again. Your uploaded report was not lost.',
           }
         }
-        return { ok: false, error: 'Could not read this report. Try a clearer photo or PDF.' }
+        let detail = `HTTP ${res.status}`
+        try {
+          const parsedErr = JSON.parse(errBody) as { error?: { message?: string } }
+          if (parsedErr.error?.message) detail = parsedErr.error.message
+        } catch {}
+        return { ok: false, error: `Gemini error (${res.status}): ${detail}` }
       }
 
       const json = (await res.json()) as {
@@ -155,7 +165,8 @@ export const analyseSoilReport = createServerFn({ method: 'POST' })
       text = json.candidates?.[0]?.content?.parts?.[0]?.text ?? ''
     } catch (error) {
       console.error('[soil-report] analysis failed', error)
-      return { ok: false, error: 'Could not read this report. Try a clearer photo or PDF.' }
+      const msg = error instanceof Error ? error.message : String(error)
+      return { ok: false, error: `Request failed: ${msg}` }
     }
 
     if (!text) return { ok: false, error: 'No readable result was returned. Try a clearer photo or PDF.' }
@@ -170,7 +181,7 @@ export const analyseSoilReport = createServerFn({ method: 'POST' })
     try {
       parsed = JSON.parse(text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, ''))
     } catch {
-      return { ok: false, error: 'Could not read this report. Try a clearer photo or PDF.' }
+      return { ok: false, error: 'Could not parse Gemini response as JSON.' }
     }
 
     const keys: (keyof SoilValues)[] = ['ph', 'organicCarbon', 'nitrogen', 'phosphorus', 'potassium']
