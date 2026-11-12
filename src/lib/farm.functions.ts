@@ -2,58 +2,6 @@ import { createServerFn } from '@tanstack/react-start'
 import { z } from 'zod'
 import { requireSupabaseAuth } from '@/integrations/supabase/auth-middleware'
 
-const GEMINI_MODELS = ['gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite'] as const
-
-async function callGeminiWithFallback(
-  apiKey: string,
-  payload: Record<string, unknown>,
-  timeoutMs = 8000,
-): Promise<{ ok: true; text: string } | { ok: false; status: number; detail: string }> {
-  let lastStatus = 500
-  let lastDetail = 'Unknown error'
-
-  for (const model of GEMINI_MODELS) {
-    try {
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-          signal: AbortSignal.timeout(timeoutMs),
-        },
-      )
-
-      if (!res.ok) {
-        lastStatus = res.status
-        const errBody = await res.text()
-        console.warn(`[gemini] ${model} failed (${res.status}), trying next fallback...`, errBody)
-        lastDetail = `HTTP ${res.status}`
-        try {
-          const parsedErr = JSON.parse(errBody) as { error?: { message?: string } }
-          if (parsedErr.error?.message) lastDetail = parsedErr.error.message
-        } catch {}
-        continue
-      }
-
-      const json = (await res.json()) as {
-        candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>
-      }
-      const text = json.candidates?.[0]?.content?.parts?.[0]?.text ?? ''
-      if (text.trim()) {
-        return { ok: true, text }
-      }
-      lastDetail = `Empty response from ${model}`
-    } catch (error) {
-      lastStatus = 504
-      lastDetail = error instanceof Error ? error.message : String(error)
-      console.warn(`[gemini] ${model} timed out or failed, trying next fallback...`, lastDetail)
-    }
-  }
-
-  return { ok: false, status: lastStatus, detail: lastDetail }
-}
-
 /* ---------- Voice assistant ---------- */
 
 export const askAssistant = createServerFn({ method: 'POST' })
@@ -86,24 +34,31 @@ Always reply in ${language}. Your reply will be read aloud by text-to-speech, so
 The app has screens: Home, Crop advice, Leaf scan, Fertilizer schedule, Ledger, Subsidies, Disaster aid, Devices, Field GPS location. Suggest a relevant screen when helpful.
 Farmer context: ${data.context}`
 
-    const result = await callGeminiWithFallback(
-      apiKey,
-      {
-        systemInstruction: { parts: [{ text: systemPrompt }] },
-        contents: [{ role: 'user', parts: [{ text: data.question }] }],
-        generationConfig: {
-          thinkingConfig: { thinkingBudget: 0 },
+    try {
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${encodeURIComponent(apiKey)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+            contents: [{ role: 'user', parts: [{ text: data.question }] }],
+          }),
         },
-      },
-      7000,
-    )
-
-    if (!result.ok) {
-      console.error('[assistant] All Gemini models failed', result.status, result.detail)
+      )
+      if (!res.ok) {
+        console.error('[assistant] Gemini API error', res.status, await res.text())
+        return { answer: '', error: 'Assistant unavailable' }
+      }
+      const json = (await res.json()) as {
+        candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>
+      }
+      const text = json.candidates?.[0]?.content?.parts?.[0]?.text
+      return { answer: typeof text === 'string' ? text.trim() : '' }
+    } catch (error) {
+      console.error('[assistant] generation failed', error)
       return { answer: '', error: 'Assistant unavailable' }
     }
-
-    return { answer: result.text.trim() }
   })
 
 /* ---------- Soil health card reader ---------- */
@@ -162,38 +117,59 @@ export const analyseSoilReport = createServerFn({ method: 'POST' })
       return { ok: false, error: 'GEMINI_AI_API / GEMINI_API_KEY is not configured on the server.' }
     }
 
-    const result = await callGeminiWithFallback(
-      apiKey,
-      {
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              { text: SOIL_PROMPT },
-              { inlineData: { mimeType: data.mimeType, data: data.base64 } },
+    let text = ''
+    try {
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${encodeURIComponent(apiKey)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [
+              {
+                role: 'user',
+                parts: [
+                  { text: SOIL_PROMPT },
+                  { inlineData: { mimeType: data.mimeType, data: data.base64 } },
+                ],
+              },
             ],
-          },
-        ],
-        generationConfig: {
-          temperature: 0,
-          responseMimeType: 'application/json',
-          thinkingConfig: { thinkingBudget: 0 },
+            generationConfig: {
+              temperature: 0,
+              responseMimeType: 'application/json',
+            },
+          }),
         },
-      },
-      8500,
-    )
+      )
 
-    if (!result.ok) {
-      if (result.status === 429) {
-        return {
-          ok: false,
-          error: 'The report reader is busy. Please wait 30 seconds and try again. Your uploaded report was not lost.',
+      if (!res.ok) {
+        const errBody = await res.text()
+        console.error('[soil-report] Gemini API error', res.status, errBody)
+        if (res.status === 429) {
+          return {
+            ok: false,
+            error: 'The report reader is busy. Please wait 30 seconds and try again. Your uploaded report was not lost.',
+          }
         }
+        let detail = `HTTP ${res.status}`
+        try {
+          const parsedErr = JSON.parse(errBody) as { error?: { message?: string } }
+          if (parsedErr.error?.message) detail = parsedErr.error.message
+        } catch {}
+        return { ok: false, error: `Gemini error (${res.status}): ${detail}` }
       }
-      return { ok: false, error: `Gemini error (${result.status}): ${result.detail}` }
+
+      const json = (await res.json()) as {
+        candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>
+      }
+      text = json.candidates?.[0]?.content?.parts?.[0]?.text ?? ''
+    } catch (error) {
+      console.error('[soil-report] analysis failed', error)
+      const msg = error instanceof Error ? error.message : String(error)
+      return { ok: false, error: `Request failed: ${msg}` }
     }
 
-    const text = result.text
+    if (!text) return { ok: false, error: 'No readable result was returned. Try a clearer photo or PDF.' }
 
     let parsed: {
       documentType?: string
@@ -271,4 +247,28 @@ export const reverseGeocode = createServerFn({ method: 'POST' })
   .inputValidator((input) => coords.parse(input))
   .handler(async ({ data }) => {
     try {
-      const url = new URL('
+      const url = new URL('https://nominatim.openstreetmap.org/reverse')
+      url.searchParams.set('format', 'jsonv2')
+      url.searchParams.set('lat', String(data.latitude))
+      url.searchParams.set('lon', String(data.longitude))
+      url.searchParams.set('zoom', '10')
+      url.searchParams.set('addressdetails', '1')
+      const response = await fetch(url, {
+        headers: { 'User-Agent': 'KhetMitra/1.0 (farm location lookup)', 'Accept-Language': 'en' },
+        signal: AbortSignal.timeout(10000),
+      })
+      if (!response.ok) return { error: 'The location service could not identify this area.', village: '', district: '' }
+      const json = (await response.json()) as { address?: Record<string, string>; display_name?: string }
+      const a = json.address ?? {}
+      const pick = (...keys: string[]) => keys.map((k) => a[k]).find((v) => typeof v === 'string' && v) ?? ''
+      const village = pick('village', 'hamlet', 'locality', 'town', 'city', 'municipality', 'suburb', 'neighbourhood')
+      const district = pick('state_district', 'district', 'county')
+      return { village, district, displayName: json.display_name ?? '', error: '' }
+    } catch {
+      return {
+        error: 'Unable to look up this location right now. Please enter the village and district manually.',
+        village: '',
+        district: '',
+      }
+    }
+  })
