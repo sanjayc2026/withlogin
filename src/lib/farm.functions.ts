@@ -36,7 +36,7 @@ Farmer context: ${data.context}`
 
     try {
       const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${encodeURIComponent(apiKey)}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -120,7 +120,7 @@ export const analyseSoilReport = createServerFn({ method: 'POST' })
     let text = ''
     try {
       const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${encodeURIComponent(apiKey)}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
